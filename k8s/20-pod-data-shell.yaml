@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: geochangemllm-data-shell
+  namespace: geochangemllm
+  labels:
+    app.kubernetes.io/name: geochangemllm
+    app.kubernetes.io/component: data-shell
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: shell
+      image: geochangemllm:0.1.0
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/bash", "-lc", "sleep infinity"]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: geochangemllm-data
+    - name: tmp
+      emptyDir: {}

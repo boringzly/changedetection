@@ -1,0 +1,108 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geochangemllm-tiny-smoke
+  namespace: geochangemllm
+  labels:
+    app.kubernetes.io/name: geochangemllm
+    app.kubernetes.io/component: smoke-train
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: geochangemllm
+        app.kubernetes.io/component: smoke-train
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: trainer
+          # Replace this image with your private/local registry address.
+          image: geochangemllm:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              python -m geochangemllm.doctor
+              python -m geochangemllm.make_smoke_data \
+                --output-dir /data/smoke \
+                --num-samples 32 \
+                --image-size 256
+              torchrun --standalone --nproc_per_node=2 -m geochangemllm.train \
+                --manifest /data/smoke/manifest.jsonl \
+                --output-dir /data/outputs/tiny-smoke \
+                --text-model tiny \
+                --image-size 256 \
+                --batch-size 4 \
+                --num-workers 4 \
+                --max-steps 20 \
+                --log-every 1
+              python -m geochangemllm.infer \
+                --checkpoint /data/outputs/tiny-smoke/checkpoint.pt \
+                --manifest /data/smoke/manifest.jsonl \
+                --output-dir /data/outputs/tiny-infer \
+                --generate-text
+          env:
+            - name: HOME
+              value: /home/trainer
+            - name: HF_HOME
+              value: /cache/huggingface
+            - name: TORCH_HOME
+              value: /cache/torch
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+              value: "1"
+            - name: OMP_NUM_THREADS
+              value: "4"
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+            limits:
+              cpu: "12"
+              memory: 48Gi
+              nvidia.com/gpu: "2"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: cache
+              mountPath: /cache
+            - name: home
+              mountPath: /home/trainer
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: geochangemllm-data
+        - name: cache
+          persistentVolumeClaim:
+            claimName: geochangemllm-cache
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
