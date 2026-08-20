@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 outputs/
 data/smoke/
+data/sequence-smoke/
