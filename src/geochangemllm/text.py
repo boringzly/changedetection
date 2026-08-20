@@ -196,6 +196,21 @@ class TextAdapter(nn.Module):
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)
 
+    @staticmethod
+    def _prepend_visual_tokens(
+        visual_tokens: torch.Tensor, text_embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        # Vision modules normally emit FP32 tensors during inference, while
+        # pretrained language models are commonly loaded as BF16. torch.cat
+        # promotes the mixed inputs to FP32, which then fails in BF16 linear
+        # layers. Match the language embedding dtype explicitly; autocast made
+        # this mismatch invisible during training.
+        visual_tokens = visual_tokens.to(
+            device=text_embeddings.device,
+            dtype=text_embeddings.dtype,
+        )
+        return torch.cat((visual_tokens, text_embeddings), dim=1)
+
     def language_loss(
         self,
         visual_tokens: torch.Tensor,
@@ -204,7 +219,7 @@ class TextAdapter(nn.Module):
     ) -> torch.Tensor:
         prepared = self.prepare_supervision(prompts, targets, visual_tokens.device)
         text_embeddings = self.embed(prepared.input_ids)
-        inputs_embeds = torch.cat((visual_tokens, text_embeddings), dim=1)
+        inputs_embeds = self._prepend_visual_tokens(visual_tokens, text_embeddings)
         prefix_length = visual_tokens.shape[1]
         prefix_mask = torch.ones(
             (visual_tokens.shape[0], prefix_length),
@@ -244,7 +259,7 @@ class TextAdapter(nn.Module):
             input_ids[row, : len(ids)] = torch.tensor(ids, device=visual_tokens.device)
             attention[row, : len(ids)] = 1
         prompt_embeddings = self.embed(input_ids)
-        inputs_embeds = torch.cat((visual_tokens, prompt_embeddings), dim=1)
+        inputs_embeds = self._prepend_visual_tokens(visual_tokens, prompt_embeddings)
         prefix_mask = torch.ones(
             visual_tokens.shape[:2], dtype=attention.dtype, device=visual_tokens.device
         )

@@ -4,6 +4,7 @@ import torch
 
 from geochangemllm.losses import joint_loss
 from geochangemllm.model import GeoChangeMLLM
+from geochangemllm.text import TextAdapter
 
 
 def test_joint_forward_backward() -> None:
@@ -22,3 +23,13 @@ def test_joint_forward_backward() -> None:
     loss.backward()
     assert output["mask_logits"].shape == masks.shape
     assert model.token_projector.project[1].weight.grad is not None
+
+
+def test_visual_tokens_follow_language_embedding_dtype() -> None:
+    visual_tokens = torch.rand(2, 17, 32, dtype=torch.float32)
+    text_embeddings = torch.rand(2, 8, 32, dtype=torch.bfloat16)
+
+    combined = TextAdapter._prepend_visual_tokens(visual_tokens, text_embeddings)
+
+    assert combined.dtype == torch.bfloat16
+    assert combined.shape == (2, 25, 32)
