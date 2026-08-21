@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${IMAGE:-geochangemllm:0.2.0}"
+IMAGE="${IMAGE:-geochangemllm:0.3.0}"
 DATA_VOLUME="${DATA_VOLUME:-geochangemllm-data}"
 CACHE_VOLUME="${CACHE_VOLUME:-geochangemllm-cache}"
-QWEN_PATH="${QWEN_PATH:-/cache/models/Qwen3-0.6B}"
+QWEN_VL_PATH="${QWEN_VL_PATH:-/cache/models/Qwen3-VL-2B-Instruct}"
 
 docker run --rm \
   --name geochangemllm-sequence-smoke \
@@ -28,6 +28,11 @@ docker run --rm \
   bash -lc "
     set -euo pipefail
 
+    test -f '${QWEN_VL_PATH}/config.json' || {
+      echo 'missing Qwen3-VL model: ${QWEN_VL_PATH}' >&2
+      exit 2
+    }
+
     python -m geochangemllm.make_sequence_smoke_data \
       --output-dir /data/sequence-smoke \
       --num-sequences 8 \
@@ -50,10 +55,11 @@ docker run --rm \
       -m geochangemllm.train_weak_sequence \
       --manifest /data/sequence-smoke/manifest.jsonl \
       --vision-checkpoint /data/outputs/unsupervised-smoke/vision_checkpoint.pt \
-      --output-dir /data/outputs/weak-qwen-smoke \
-      --text-model '${QWEN_PATH}' \
+      --output-dir /data/outputs/weak-qwenvl-smoke \
+      --vl-model '${QWEN_VL_PATH}' \
       --lora-rank 16 \
       --max-frames 4 \
+      --token-grid 2 \
       --max-text-tokens 256 \
       --image-size 256 \
       --batch-size 1 \
@@ -61,11 +67,12 @@ docker run --rm \
       --epochs 20 \
       --max-steps 10 \
       --precision bf16 \
+      --text-learning-rate 1e-5 \
       --log-every 1
 
     python -m geochangemllm.infer_sequence \
-      --checkpoint /data/outputs/weak-qwen-smoke/checkpoint.pt \
+      --checkpoint /data/outputs/weak-qwenvl-smoke/checkpoint.pt \
       --manifest /data/sequence-smoke/manifest.jsonl \
-      --output-dir /data/outputs/weak-qwen-infer \
+      --output-dir /data/outputs/weak-qwenvl-infer \
       --generate-text
   "

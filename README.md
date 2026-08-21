@@ -1,16 +1,18 @@
 # GeoChangeMLLM：变化检测 × 语言模型最小闭环
 
-本仓库先解决一件事：在一台 `2 × RTX 4090 24GB` 服务器上走通“双时相影像 → 像素变化掩膜 → 变化 Token → 小型 Qwen → 联合损失 → DDP 训练 → 推理结果”的完整链路。
+本仓库先解决一件事：在一台 `2 × RTX 4090 24GB` 服务器上走通“TIF 时序 → 像素变化掩膜 → Qwen3-VL 原生视频语义 + 有序变化 Token → 联合损失 → DDP 训练 → 推理结果”的完整链路。
 
-当前版本包含有监督双时相 MVP，以及两条 TIF 时序训练链路：无监督视觉预训练、使用整段多帧影像和 Claude 描述的 Qwen 弱监督训练。数据格式、原理和 Docker 测试命令见 [TIF 时序无监督与弱监督训练](docs/sequence_training.md)。
+当前版本包含有监督双时相 MVP，以及两条 TIF 时序训练链路：无监督视觉预训练、使用整段多帧影像和 Claude 描述的 Qwen3-VL 弱监督训练。数据格式、原理和 Docker 测试命令见 [TIF 时序无监督与弱监督训练](docs/sequence_training.md)。
 
 共享服务器默认采用 Docker + K3s Job，不在宿主机安装 Python 依赖。直接从 [K3s 运行说明](k8s/README.md) 开始；下面的裸命令仅用于独占开发机或容器内部调试。
 
 ## 结构
 
 ```text
-T1/T2 → 共享孪生卷积编码器 → 多尺度时相融合 → 变化解码器 → mask
-                                  └→ Change Token Projector → Tiny/Qwen → description
+TIF RGB时序 → Qwen3-VL Video Encoder → 原生语义Token ────────────────┐
+                                                                    ├→ Qwen3-VL + LoRA → description
+TIF多时相 → 孪生变化网络 → C12/C23/C34有序Change Token + GSD Token ─┘
+                         └→ 时序聚合 → 变化解码器 → mask
 ```
 
 联合损失：
@@ -19,7 +21,7 @@ T1/T2 → 共享孪生卷积编码器 → 多尺度时相融合 → 变化解码
 L = BCE(mask) + Dice(mask) + text_loss_weight × CausalLM(description)
 ```
 
-`tiny` 文本头不需要联网，用于验证训练链路；`Qwen/Qwen3-0.6B` 用于验证真实语言模型连接和 LoRA。
+`tiny` 文本头不需要联网，用于验证基础训练链路；正式时序多模态路径使用 `Qwen/Qwen3-VL-2B-Instruct`。原来的 `Qwen/Qwen3-0.6B` 纯文本软前缀路径继续保留用于回归测试。
 
 ## 服务器环境
 

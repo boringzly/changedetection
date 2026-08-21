@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
 from torch import nn
@@ -216,16 +216,25 @@ class TextAdapter(nn.Module):
         visual_tokens: torch.Tensor,
         prompts: Sequence[str],
         targets: Sequence[str],
+        visual_mask: torch.Tensor | None = None,
+        semantic_inputs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
+        del semantic_inputs
         prepared = self.prepare_supervision(prompts, targets, visual_tokens.device)
         text_embeddings = self.embed(prepared.input_ids)
         inputs_embeds = self._prepend_visual_tokens(visual_tokens, text_embeddings)
         prefix_length = visual_tokens.shape[1]
-        prefix_mask = torch.ones(
-            (visual_tokens.shape[0], prefix_length),
-            dtype=prepared.attention_mask.dtype,
-            device=visual_tokens.device,
-        )
+        if visual_mask is None:
+            prefix_mask = torch.ones(
+                (visual_tokens.shape[0], prefix_length),
+                dtype=prepared.attention_mask.dtype,
+                device=visual_tokens.device,
+            )
+        else:
+            prefix_mask = visual_mask.to(
+                device=visual_tokens.device,
+                dtype=prepared.attention_mask.dtype,
+            )
         attention_mask = torch.cat((prefix_mask, prepared.attention_mask), dim=1)
         prefix_labels = torch.full(
             (visual_tokens.shape[0], prefix_length),
@@ -247,7 +256,10 @@ class TextAdapter(nn.Module):
         visual_tokens: torch.Tensor,
         prompts: Sequence[str],
         max_new_tokens: int = 48,
+        visual_mask: torch.Tensor | None = None,
+        semantic_inputs: dict[str, Any] | None = None,
     ) -> list[str]:
+        del semantic_inputs
         prompt_ids = [self._encode(prompt, add_bos=True, add_eos=False) for prompt in prompts]
         max_length = max(len(ids) for ids in prompt_ids)
         pad_id = int(self.tokenizer.pad_token_id)
@@ -260,9 +272,12 @@ class TextAdapter(nn.Module):
             attention[row, : len(ids)] = 1
         prompt_embeddings = self.embed(input_ids)
         inputs_embeds = self._prepend_visual_tokens(visual_tokens, prompt_embeddings)
-        prefix_mask = torch.ones(
-            visual_tokens.shape[:2], dtype=attention.dtype, device=visual_tokens.device
-        )
+        if visual_mask is None:
+            prefix_mask = torch.ones(
+                visual_tokens.shape[:2], dtype=attention.dtype, device=visual_tokens.device
+            )
+        else:
+            prefix_mask = visual_mask.to(device=visual_tokens.device, dtype=attention.dtype)
         full_attention = torch.cat((prefix_mask, attention), dim=1)
 
         if self.is_tiny:

@@ -25,9 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/weak-qwen"))
     parser.add_argument("--vision-checkpoint", type=Path)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--text-model", required=True)
+    model_group = parser.add_mutually_exclusive_group(required=True)
+    model_group.add_argument("--text-model")
+    model_group.add_argument("--vl-model")
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--freeze-text", action="store_true")
+    parser.add_argument("--ordered-change-tokens", action="store_true")
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--in-channels", type=int, default=3)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -39,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--grad-accum", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--text-learning-rate", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--text-loss-weight", type=float, default=0.20)
     parser.add_argument("--pseudo-loss-weight", type=float, default=1.0)
@@ -46,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stable-quantile", type=float, default=0.50)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="bf16")
+    parser.add_argument("--vl-min-pixels", type=int, default=50_176)
+    parser.add_argument("--vl-max-pixels", type=int, default=200_704)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -106,11 +112,16 @@ def main() -> None:
     model: torch.nn.Module = GeoSequenceChangeMLLM(
         in_channels=args.in_channels,
         base_channels=args.base_channels,
-        text_model=args.text_model,
+        text_model=args.text_model or "tiny",
         lora_rank=args.lora_rank,
         freeze_text=args.freeze_text,
         token_grid=args.token_grid,
         max_text_tokens=args.max_text_tokens,
+        vl_model=args.vl_model,
+        ordered_change_tokens=args.ordered_change_tokens,
+        max_change_pairs=args.max_frames - 1,
+        vl_min_pixels=args.vl_min_pixels,
+        vl_max_pixels=args.vl_max_pixels,
     )
     if args.vision_checkpoint and not args.resume:
         loaded = load_vision_checkpoint(model, args.vision_checkpoint)
@@ -123,7 +134,43 @@ def main() -> None:
             device_ids=[local_rank] if device.type == "cuda" else None,
         )
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=args.weight_decay)
+    if args.vl_model:
+        text_parameters = []
+        vision_parameters = []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            normalized = name.removeprefix("module.")
+            if normalized.startswith("text.model."):
+                text_parameters.append(parameter)
+            else:
+                vision_parameters.append(parameter)
+        optimizer_groups = []
+        if vision_parameters:
+            optimizer_groups.append(
+                {
+                    "params": vision_parameters,
+                    "lr": args.learning_rate,
+                    "weight_decay": args.weight_decay,
+                }
+            )
+        if text_parameters:
+            optimizer_groups.append(
+                {
+                    "params": text_parameters,
+                    "lr": args.text_learning_rate,
+                    "weight_decay": 0.0,
+                }
+            )
+        optimizer = torch.optim.AdamW(optimizer_groups)
+    else:
+        text_parameters = []
+        vision_parameters = parameters
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
     start_step = 0
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
@@ -142,7 +189,9 @@ def main() -> None:
         print(
             f"mode=weak_sequence device={device} world_size={world_size} "
             f"sequences={len(dataset)} max_frames={args.max_frames} "
-            f"trainable={trainable:,}/{total:,}"
+            f"vl_model={args.vl_model or 'none'} trainable={trainable:,}/{total:,} "
+            f"change_connector={sum(p.numel() for p in vision_parameters):,} "
+            f"text_lora={sum(p.numel() for p in text_parameters):,}"
         )
 
     use_amp = device.type == "cuda" and args.precision != "fp32"
@@ -157,6 +206,16 @@ def main() -> None:
             sampler.set_epoch(epoch)
         model.train()
         for batch in loader:
+            raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+            semantic_inputs = raw_model.prepare_semantic_inputs(
+                batch["frames"],
+                batch["frame_mask"],
+            )
+            if semantic_inputs is not None:
+                semantic_inputs = {
+                    name: value.to(device, non_blocking=True)
+                    for name, value in semantic_inputs.items()
+                }
             frames = batch["frames"].to(device, non_blocking=True)
             frame_mask = batch["frame_mask"].to(device, non_blocking=True)
             gsd = batch["gsd"].to(device, non_blocking=True)
@@ -178,6 +237,7 @@ def main() -> None:
                         gsd,
                         batch["domain"],
                         batch["description"],
+                        semantic_inputs=semantic_inputs,
                     )
                     pseudo, parts = pseudo_change_loss(
                         output["mask_logits"], targets, confidence
